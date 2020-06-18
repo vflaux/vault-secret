@@ -9,7 +9,6 @@ all:
 
 vendor:
 	go mod tidy
-	go mod vendor
 
 .PHONY: clean
 clean:
