@@ -2,8 +2,8 @@ package vaultsecret
 
 import (
 	"context"
-	goerrors "errors"
 	"fmt"
+
 	maupuv1beta1 "github.com/nmaupu/vault-secret/pkg/apis/maupu/v1beta1"
 	nmvault "github.com/nmaupu/vault-secret/pkg/vault"
 	corev1 "k8s.io/api/core/v1"
@@ -16,10 +16,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	logf "sigs.k8s.io/controller-runtime/pkg/runtime/log"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 )
 
@@ -219,9 +219,9 @@ func newSecretForCR(cr *maupuv1beta1.VaultSecret) (*corev1.Secret, error) {
 	cr.Status.Entries = nil
 	// Creating secret data from CR
 	for _, s := range cr.Spec.Secrets {
-		errMessage := ""
-		rootErrMessage := ""
-		status := true
+		var errMessage string
+		var rootErrMessage string
+		var status bool
 
 		// Vault read
 		sec, err := nmvault.Read(vclient, s.KvPath, s.Path)
@@ -260,7 +260,7 @@ func newSecretForCR(cr *maupuv1beta1.VaultSecret) (*corev1.Secret, error) {
 	var retErr error
 	retErr = nil
 	if hasError {
-		retErr = goerrors.New(fmt.Sprintf("Secret %s cannot be created, see CR Status field for details", cr.Spec.SecretName))
+		retErr = fmt.Errorf("Secret %s cannot be created, see CR Status field for details", cr.Spec.SecretName)
 	}
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
