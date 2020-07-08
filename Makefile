@@ -1,6 +1,7 @@
 default: all
 CIRCLE_TAG ?= latest
-IMAGE_NAME = nmaupu/vault-secret:$(CIRCLE_TAG)
+DOCKER_ID ?= nmaupu
+IMAGE_NAME = $(DOCKER_ID)/vault-secret:$(CIRCLE_TAG)
 
 .PHONY: all
 all: build push
@@ -16,8 +17,11 @@ clean:
 
 .PHONY: build
 build: deps
-	operator-sdk generate k8s
 	operator-sdk build $(IMAGE_NAME)
+
+.PHONY: codegen
+codegen:
+	operator-sdk generate k8S
 
 .PHONY: openapi
 openapi:
@@ -31,7 +35,7 @@ push:
 test:
 	go test -v ./...
 
-.PHONY: CI-release
+.PHONY: CI-release-prepare
 CI-release-prepare:
 	mkdir -p release/manifests/crds
 	cp -a deploy/*.yaml release/manifests
@@ -42,6 +46,7 @@ CI-release-prepare:
 	rm -rf release/manifests/
 	sed -i -e "s/latest/$(CIRCLE_TAG)/g" version/version.go
 
+.PHONY: test-manifest
 test-manifest:
 	mkdir -p release/manifests
 	cp deploy/operator.yaml release/manifests

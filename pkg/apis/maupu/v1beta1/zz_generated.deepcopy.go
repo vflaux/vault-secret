@@ -117,6 +117,7 @@ func (in *VaultSecretSpec) DeepCopyInto(out *VaultSecretSpec) {
 			(*out)[key] = val
 		}
 	}
+	out.SyncPeriod = in.SyncPeriod
 	return
 }
 

@@ -1,13 +1,14 @@
-package v1beta1
+package vaultsecret
 
 import (
 	"errors"
 
+	maupuv1beta1 "github.com/nmaupu/vault-secret/pkg/apis/maupu/v1beta1"
 	nmvault "github.com/nmaupu/vault-secret/pkg/vault"
 )
 
 // Get VaultAuthProvider implem from custom resource object
-func (cr *VaultSecret) GetVaultAuthProvider() (nmvault.VaultAuthProvider, error) {
+func GetVaultAuthProvider(cr *maupuv1beta1.VaultSecret) (nmvault.VaultAuthProvider, error) {
 	// Checking order:
 	//   - Token
 	//   - AppRole
@@ -35,7 +36,7 @@ func (cr *VaultSecret) GetVaultAuthProvider() (nmvault.VaultAuthProvider, error)
 }
 
 // BySecretKey allows sorting an array of VaultSecretSpecSecret by SecretKey
-type BySecretKey []VaultSecretSpecSecret
+type BySecretKey []maupuv1beta1.VaultSecretSpecSecret
 
 // Len returns the len of a BySecretKey object
 func (a BySecretKey) Len() int { return len(a) }

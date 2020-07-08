@@ -2,29 +2,29 @@ package vaultsecret
 
 import (
 	"context"
-	goerrors "errors"
-	"fmt"
 	"os"
 	"sort"
 	"time"
 
 	maupuv1beta1 "github.com/nmaupu/vault-secret/pkg/apis/maupu/v1beta1"
+	"github.com/nmaupu/vault-secret/pkg/vault"
 	nmvault "github.com/nmaupu/vault-secret/pkg/vault"
 	appVersion "github.com/nmaupu/vault-secret/version"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	logf "sigs.k8s.io/controller-runtime/pkg/runtime/log"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 )
 
@@ -36,6 +36,15 @@ const (
 )
 
 var log = logf.Log.WithName(OperatorAppName)
+
+var operatorName string
+
+func init() {
+	operatorName = os.Getenv("OPERATOR_NAME")
+	if operatorName == "" {
+		operatorName = OperatorAppName
+	}
+}
 
 // LabelsFilter Fitlers events on labels
 var LabelsFilter map[string]string
@@ -75,15 +84,15 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 
 		// Trying to determine what sort of event it is
 		// https://tour.golang.org/methods/16
-		switch e.(type) {
+		switch e := e.(type) {
 		case event.CreateEvent:
-			objectLabels = e.(event.CreateEvent).Meta.GetLabels()
+			objectLabels = e.Meta.GetLabels()
 		case event.UpdateEvent:
-			objectLabels = e.(event.UpdateEvent).MetaNew.GetLabels()
+			objectLabels = e.MetaNew.GetLabels()
 		case event.DeleteEvent:
-			objectLabels = e.(event.DeleteEvent).Meta.GetLabels()
+			objectLabels = e.Meta.GetLabels()
 		case event.GenericEvent:
-			objectLabels = e.(event.GenericEvent).Meta.GetLabels()
+			objectLabels = e.Meta.GetLabels()
 		default: // should never happen except if a new Event type is created
 			return false
 		}
@@ -123,10 +132,11 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	}
 
 	// Also watch for operator's created secrets
-	err = c.Watch(&source.Kind{Type: &corev1.Secret{}}, &handler.EnqueueRequestForOwner{
-		IsController: true,
-		OwnerType:    &maupuv1beta1.VaultSecret{},
-	}, pred)
+	//err = c.Watch(&source.Kind{Type: &corev1.Secret{}}, &handler.EnqueueRequestForOwner{
+	//	IsController: true,
+	//	OwnerType:    &maupuv1beta1.VaultSecret{},
+	//}, pred)
+
 	if err != nil {
 		return err
 	}
@@ -163,70 +173,17 @@ func (r *ReconcileVaultSecret) Reconcile(request reconcile.Request) (reconcile.R
 			return reconcile.Result{}, nil
 		}
 
-		reqLogger.Info(fmt.Sprintf("Error reading the vaultsecret object, requeuing, err=%v", err))
+		reqLogger.Error(err, "Error reading the VaultSecret resource, requeuing")
 		// Error reading the object - requeue the request.
 		return reconcile.Result{}, err
 	}
 
-	// Define a new Secret object from CR specs
-	secretFromCR, err := newSecretForCR(CRInstance)
-	if err != nil && secretFromCR == nil {
-		// An error occurred, requeue
-		reqLogger.Error(err, "An error occurred when creating secret from CR, requeuing.")
-		return reconcile.Result{}, err
-	} else if err != nil && secretFromCR != nil {
-		// Some vault path and/or fields are not found, update CR (status) and requeue
-		if updateErr := r.client.Status().Update(context.TODO(), CRInstance); updateErr != nil {
-			reqLogger.Error(updateErr, fmt.Sprintf("Some errors occurred but CR cannot be updated, requeuing, original error=%v", err))
-		} else {
-			reqLogger.Error(err, "Some errors have been issued in the CR status information, please check, requeuing")
-		}
-		return reconcile.Result{}, err
-	}
-
-	// Everything's ok
-
-	// Set VaultSecret CRInstance as the owner and controller
-	if err = controllerutil.SetControllerReference(CRInstance, secretFromCR, r.scheme); err != nil {
-		reqLogger.Error(err, "An error occurred when setting controller reference, requeuing")
-		return reconcile.Result{}, err
-	}
-
-	// Creating or updating secret resource from CR
-	// Check if this Secret already exists
-	found := &corev1.Secret{}
-	err = r.client.Get(context.TODO(), types.NamespacedName{Name: secretFromCR.Name, Namespace: secretFromCR.Namespace}, found)
-	if err != nil && errors.IsNotFound(err) {
-		// Secret does not exist, creating it
-		reqLogger.Info(fmt.Sprintf("Creating new Secret %s/%s", secretFromCR.Namespace, secretFromCR.Name))
-		err = r.client.Create(context.TODO(), secretFromCR)
-	} else {
-		// Secret already exists - updating
-		reqLogger.Info(fmt.Sprintf("Reconciling existing Secret %s/%s", found.Namespace, found.Name))
-		err = r.client.Update(context.TODO(), secretFromCR)
-	}
-
-	// No problem creating or updating secret, updating CR info
-	/*reqLogger.Info("Updating CR status information")
-	if updateErr := r.client.Status().Update(context.TODO(), CRInstance); updateErr != nil {
-		reqLogger.Error(updateErr, "An error occurred when updating CR status")
-	}*/
-
-	// finally return giving err (nil if not problem occurred, set to something otherwise)
-	return reconcile.Result{RequeueAfter: CRInstance.Spec.SyncPeriod.Duration}, err
-}
-
-func newSecretForCR(cr *maupuv1beta1.VaultSecret) (*corev1.Secret, error) {
-	operatorName := os.Getenv("OPERATOR_NAME")
-	if operatorName == "" {
-		operatorName = OperatorAppName
-	}
 	labels := map[string]string{
 		"app.kubernetes.io/name":       OperatorAppName,
 		"app.kubernetes.io/version":    appVersion.Version,
 		"app.kubernetes.io/managed-by": operatorName,
-		"crName":                       cr.Name,
-		"crNamespace":                  cr.Namespace,
+		"crName":                       CRInstance.Name,
+		"crNamespace":                  CRInstance.Namespace,
 		"lastUpdate":                   time.Now().Format(TimeFormat),
 	}
 
@@ -235,76 +192,152 @@ func newSecretForCR(cr *maupuv1beta1.VaultSecret) (*corev1.Secret, error) {
 		labels[key] = val
 	}
 
-	secretName := cr.Spec.SecretName
+	secretName := CRInstance.Spec.SecretName
 	if secretName == "" {
-		secretName = cr.Name
+		secretName = CRInstance.Name
 	}
 
-	secretType := cr.Spec.SecretType
+	secretType := CRInstance.Spec.SecretType
 	if secretType == "" {
 		secretType = "Opaque"
 	}
 
-	for key, val := range cr.Spec.SecretLabels {
+	for key, val := range CRInstance.Spec.SecretLabels {
 		labels[key] = val
 	}
 
-	// Authentication provider
-	authProvider, err := cr.GetVaultAuthProvider()
+	var secretData map[string][]byte
+	var statusEntries []maupuv1beta1.VaultSecretStatusEntry
+	var operationResult controllerutil.OperationResult
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: request.Namespace},
+	}
+
+	err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		var err error
+		operationResult, err = controllerutil.CreateOrUpdate(context.TODO(), r.client, secret, func() error {
+			// As type field is immutable we quickly update the resource before reading from vault.
+			// We expect a genuine error from the api server.
+			if secret.Type != secretType && secret.Type != "" {
+				secret.Type = secretType
+				return nil
+			}
+
+			// Only read secret data once
+			if secretData == nil {
+				secretData, statusEntries, err = readSecretData(CRInstance)
+			}
+
+			// Set labels
+			if secret.Labels == nil {
+				secret.Labels = make(map[string]string)
+			}
+			for k, v := range labels {
+				secret.Labels[k] = v
+			}
+
+			secret.Type = secretType
+			secret.Data = secretData
+
+			if err = controllerutil.SetControllerReference(CRInstance, secret, r.scheme); err != nil {
+				return err
+			}
+			return nil
+		})
+		return err
+	})
+
 	if err != nil {
-		return nil, err
+		// If the resource is invalid then next recouncile is unlikely to succeed so we don't requeue
+		if errors.IsInvalid(err) {
+			reqLogger.Error(err, "Failed to update VaultSecret")
+			return reconcile.Result{}, nil
+		}
+		return reconcile.Result{}, err
+	}
+
+	switch operationResult {
+	case controllerutil.OperationResultCreated:
+		reqLogger.Info("Secret created", "Secret.Name", secretName)
+	case controllerutil.OperationResultUpdated:
+		reqLogger.Info("Secret updated", "Secret.Name", secretName)
+	}
+
+	// Check if some errors occured while reading vault and log it
+	for i := range statusEntries {
+		if !statusEntries[i].Status {
+			reqLogger.Info("Some errors occured while reading secrets, see VaultSecret status for details")
+			break
+		}
+	}
+
+	// Update the VaultSecret Status only if it changed
+	if statusEntries != nil && !equality.Semantic.DeepEqual(CRInstance.Status.Entries, statusEntries) {
+		CRInstance.Status.Entries = statusEntries
+		if err := r.client.Status().Update(context.TODO(), CRInstance); err != nil {
+			reqLogger.Error(err, "Failed to update VaultSecret status")
+			return reconcile.Result{}, err
+		}
+	}
+
+	return reconcile.Result{RequeueAfter: CRInstance.Spec.SyncPeriod.Duration}, err
+}
+
+func readSecretData(cr *maupuv1beta1.VaultSecret) (map[string][]byte, []maupuv1beta1.VaultSecretStatusEntry, error) {
+	reqLogger := log.WithValues("func", "readSecretData")
+
+	// Authentication provider
+	authProvider, err := GetVaultAuthProvider(cr)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	// Processing vault login
 	vaultConfig := nmvault.NewVaultConfig(cr.Spec.Config.Addr)
 	vaultConfig.Namespace = cr.Spec.Config.Namespace
 	vaultConfig.Insecure = cr.Spec.Config.Insecure
-	vclient, err := authProvider.Login(vaultConfig)
+	vClient, err := authProvider.Login(vaultConfig)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
+	vaultClient := vault.NewCachedClient(vClient)
+
 	// Init
-	hasError := false
 	secrets := map[string][]byte{}
 
-	// Clear status slice
-	cr.Status.Entries = nil
-
 	// Sort by secret keys to avoid updating the resource if order changes
-	specSecrets := cr.Spec.Secrets
-	sort.Sort(maupuv1beta1.BySecretKey(specSecrets))
+	specSecrets := append(make([]maupuv1beta1.VaultSecretSpecSecret, 0, len(cr.Spec.Secrets)), cr.Spec.Secrets...)
+	sort.Sort(BySecretKey(specSecrets))
+
+	statusEntries := make([]maupuv1beta1.VaultSecretStatusEntry, 0, len(cr.Spec.Secrets))
 
 	// Creating secret data from CR
 	for _, s := range specSecrets {
+		var err error
 		errMessage := ""
 		rootErrMessage := ""
-		status := true
+		var status bool
 
 		// Vault read
-		sec, err := nmvault.Read(vclient, s.KvPath, s.Path)
+		reqLogger.Info("Reading vault", "KvPath", s.KvPath, "Path", s.Path, "KvVersion", s.KvVersion)
+		secret, err := vaultClient.Read(s.KvVersion, s.KvPath, s.Path)
 
 		if err != nil {
-			hasError = true
-			if err != nil {
-				rootErrMessage = err.Error()
-			}
-			errMessage = "Problem occurred getting secret"
+			rootErrMessage = err.Error()
+			errMessage = "Problem occurred while reading secret"
 			status = false
-		} else if sec == nil || sec[s.Field] == nil || sec[s.Field] == "" {
-			hasError = true
-			if err != nil {
-				rootErrMessage = err.Error()
-			}
-			errMessage = "Secret field not found in vault"
+		} else if secret == nil || secret[s.Field] == nil || secret[s.Field] == "" {
+			errMessage = "Field does not exists"
 			status = false
 		} else {
 			status = true
-			secrets[s.SecretKey] = ([]byte)(sec[s.Field].(string))
+			secrets[s.SecretKey] = ([]byte)(secret[s.Field].(string))
 		}
 
 		// Updating CR Status field
-		cr.Status.Entries = append(cr.Status.Entries, maupuv1beta1.VaultSecretStatusEntry{
+		statusEntries = append(statusEntries, maupuv1beta1.VaultSecretStatusEntry{
 			Secret:    s,
 			Status:    status,
 			Message:   errMessage,
@@ -314,19 +347,6 @@ func newSecretForCR(cr *maupuv1beta1.VaultSecret) (*corev1.Secret, error) {
 
 	// Handle return
 	// Error is returned along with secret if it occurred at least once during loop
-	// In case of error, we return a half populated secret object that caller has to handle itself
-	var retErr error
-	retErr = nil
-	if hasError {
-		retErr = goerrors.New(fmt.Sprintf("Secret %s cannot be created, see CR Status field for details", cr.Spec.SecretName))
-	}
-	return &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      secretName,
-			Namespace: cr.Namespace,
-			Labels:    labels,
-		},
-		Data: secrets,
-		Type: secretType,
-	}, retErr
+	// In case of error, we only return secrets that we could read. The caller has to handle itself.
+	return secrets, statusEntries, nil
 }
